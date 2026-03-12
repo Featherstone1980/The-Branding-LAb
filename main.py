@@ -14,10 +14,9 @@ CORS(app)
 def home():
     return "LOGISTICS_BRAIN_ACTIVE"
 
-# I FORGOT THIS IN THE LAST VERSION - This is why Attempt #7 is failing
 @app.route('/api/health')
 def health():
-    return jsonify({"status": "Logistics Brain Awake", "version": "V4.0"})
+    return jsonify({"status": "Logistics Brain Awake", "version": "V5.0 - US/CA Unlocked"})
 
 # 1. CREDENTIALS
 SS_API_KEY = os.environ.get("SHIPSTATION_API_KEY")
@@ -42,6 +41,7 @@ def tomorrow_iso() -> str:
 
 def detect_country(zip_code: str) -> str:
     z = zip_code.strip().replace(" ", "")
+    # If it's alphanumeric (A1A 1A1), it's Canada. Otherwise, assume US.
     return "CA" if re.match(r"^[A-Za-z]\d[A-Za-z]\d[A-Za-z]\d$", z) else "US"
 
 def fetch_carrier_rates(carrier_name, carrier_code, weight, zip_code, to_country, ship_date):
@@ -50,11 +50,11 @@ def fetch_carrier_rates(carrier_name, carrier_code, weight, zip_code, to_country
         
         payload = {
             "carrierCode": carrier_code,
-            "fromPostalCode": "M5V2A1", # Your original origin
+            "fromPostalCode": "M5V2A1", # Your warehouse origin
             "toCountry": to_country,
             "toPostalCode": zip_code,
             "weight": {"value": float(weight), "units": "pounds"},
-            "residential": False, # Reverted to your original setting
+            "residential": False, 
             "confirmation": "none",
             "shipDate": ship_date,
         }
@@ -99,7 +99,7 @@ def get_totals():
         futures = []
         for weight in weights:
             for name, code in CARRIERS.items():
-                if to_country == "US" and name in ["Canada Post", "Purolator"]: continue
+                # THE BLOCKER WAS REMOVED HERE. All 4 carriers will ping for US and CA.
                 futures.append(executor.submit(fetch_carrier_rates, name, code, weight, zip_code, to_country, ship_date))
 
         for future in concurrent.futures.as_completed(futures):
