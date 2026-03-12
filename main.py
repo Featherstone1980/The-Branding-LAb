@@ -14,19 +14,22 @@ CORS(app)
 def home():
     return "LOGISTICS_BRAIN_ACTIVE"
 
-# 1. MATCHING YOUR RAILWAY VARIABLE NAMES
+# 1. CREDENTIALS - Synced to your Railway Variable names
 SS_API_KEY = os.environ.get("SHIPSTATION_API_KEY")
 SS_API_SECRET = os.environ.get("SHIPSTATION_API_SECRET")
 
 def get_auth_header() -> dict:
     if not SS_API_KEY or not SS_API_SECRET:
         return {}
-    creds = base64.b64encode(f"{SS_API_KEY.strip()}:{SS_API_SECRET.strip()}".encode()).decode()
+    # Encode credentials for Basic Auth
+    auth_str = f"{SS_API_KEY.strip()}:{SS_API_SECRET.strip()}"
+    creds = base64.b64encode(auth_str.encode()).decode()
     return {
         "Authorization": f"Basic {creds}",
         "Content-Type": "application/json"
     }
 
+# 2. CARRIER CONFIGURATION
 CARRIERS = {
     "UPS": "ups",
     "Canada Post": "canada_post",
@@ -39,23 +42,26 @@ def tomorrow_iso() -> str:
 
 def detect_country(zip_code: str) -> str:
     z = zip_code.strip().replace(" ", "")
-    return "CA" if re.match(r"^[A-Za-z]\d[A-Za-z]\d[A-Za-z]\d$", z) else "US"
+    # Simple regex for Canadian Postal Code
+    if re.match(r"^[A-Za-z]\d[A-Za-z]\d[A-Za-z]\d$", z):
+        return "CA"
+    return "US"
 
 def fetch_carrier_rates(carrier_name, carrier_code, weight, zip_code, to_country, ship_date):
     try:
         headers = get_auth_header()
         if not headers:
-            return carrier_name, None, 0.0, "Missing API Keys in Railway Variables"
+            return carrier_name, None, 0.0, "Railway Variables (API Keys) are missing or not found."
 
         payload = {
             "carrierCode": carrier_code,
-            "fromPostalCode": "M5V2A1", 
+            "fromPostalCode": "M5V2A1", # Warehouse Origin
             "toCountry": to_country,
             "toPostalCode": zip_code,
-            "weight": {"value": weight, "units": "pounds"},
+            "weight": {"value": float(weight), "units": "pounds"},
             "residential": True,
             "confirmation": "none",
-            "shipDate": ship_date,
+            "shipDate": ship_date
         }
         
         resp = requests.post(
@@ -66,24 +72,28 @@ def fetch_carrier_rates(carrier_name, carrier_code, weight, zip_code, to_country
         )
         
         if resp.status_code != 200:
-            return carrier_name, None, 0.0, f"Auth/API Error: {resp.text}"
+            # Returning FULL text to diagnose if it fails
+            return carrier_name, None, 0.0, f"Status {resp.status_code}: {resp.text}"
 
         raw_rates = resp.json()
         if not raw_rates:
-            return carrier_name, None, 0.0, "No rates found for this carrier"
+            return carrier_name, None, 0.0, "ShipStation returned 0 rates for this carrier."
 
+        # Sort by cost (cheapest first)
         raw_rates.sort(key=lambda r: r.get("shipmentCost", 0.0))
         best = raw_rates[0]
-        cost = best.get("shipmentCost", 0.0) + best.get("otherCost", 0.0)
+        total = best.get("shipmentCost", 0.0) + best.get("otherCost", 0.0)
         
-        return carrier_name, {"service": best.get("serviceName"), "total_cost": round(cost, 2)}, round(cost, 2), None
+        return carrier_name, {"service": best.get("serviceName"), "total_cost": round(total, 2)}, round(total, 2), None
+
     except Exception as e:
         return carrier_name, None, 0.0, str(e)
 
 @app.route("/api/get-totals", methods=["POST"])
 def get_totals():
     data = request.get_json()
-    if not data: return jsonify({"error": "No Data"}), 400
+    if not data:
+        return jsonify({"error": "No JSON body found"}), 400
 
     weights = data.get("weights", [10])
     zip_code = data.get("zip", "M5V2A1")
@@ -92,11 +102,14 @@ def get_totals():
 
     final_results = {"grand_totals": {}, "breakdown": {}, "errors": []}
 
+    # Parallel requests for speed
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = []
         for weight in weights:
             for name, code in CARRIERS.items():
-                if to_country == "US" and name in ["Canada Post", "Purolator"]: continue
+                # Skip Canadian-only carriers for US destinations
+                if to_country == "US" and name in ["Canada Post", "Purolator"]:
+                    continue
                 futures.append(executor.submit(fetch_carrier_rates, name, code, weight, zip_code, to_country, ship_date))
 
         for future in concurrent.futures.as_completed(futures):
@@ -110,6 +123,7 @@ def get_totals():
                 final_results["grand_totals"][name] += cost
                 final_results["breakdown"][name].append(service_data)
 
+    # Round final totals
     for name in final_results["grand_totals"]:
         final_results["grand_totals"][name] = round(final_results["grand_totals"][name], 2)
 
