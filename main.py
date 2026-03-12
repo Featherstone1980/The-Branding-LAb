@@ -8,7 +8,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app) # This prevents the "Failed to Fetch" error in your browser
+CORS(app)
 
 @app.route('/')
 def home():
@@ -16,46 +16,25 @@ def home():
 
 @app.route('/api/health')
 def health():
-    return jsonify({"status": "Logistics Brain Awake", "version": "V2.0-Production"})
+    return jsonify({"status": "Logistics Brain Awake", "version": "V3.0-Universal"})
 
-# 1. SHIPSTATION CREDENTIALS (Pulled from Railway Variables)
+# 1. SHIPSTATION CREDENTIALS
+# Ensure these variables are in Railway: SHIPSTATION_API_KEY, SHIPSTATION_API_SECRET
 SS_API_KEY = os.environ.get("SHIPSTATION_API_KEY")
 SS_API_SECRET = os.environ.get("SHIPSTATION_API_SECRET")
 
-# 2. CARRIER SETTINGS 
-# We use standard codes. If you use 'ShipStation Carriers', change these back to _walleted
+# 2. CARRIER CODES (Updated for compatibility)
 CARRIERS = {
     "UPS": "ups",
     "Canada Post": "canada_post",
     "FedEx": "fedex",
-    "Purolator": "purolator",
+    "Purolator": "purolator_ca"
 }
 
 CA_ONLY_CARRIERS = {"Canada Post", "Purolator"}
-DIM_FACTOR_IN = 139 
-
-# Fallback days if ShipStation doesn't provide an ETA
-DAYS_FALLBACK = {
-    "ups_standard": 4, "fedex_ground": 4, "expedited_parcel": 4, "purolator_ground": 4,
-    "ups_2nd_day_air": 2, "xpresspost": 2, "fedex_2day": 2, "purolator_express": 2,
-    "ups_next_day_air": 1, "priority": 1, "fedex_priority_overnight": 1
-}
 
 def tomorrow_iso() -> str:
     return (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
-
-def resolve_transit(service_code: str, raw_eta, raw_days, ship_date: str) -> dict:
-    days = int(round(raw_days)) if raw_days is not None else DAYS_FALLBACK.get(service_code, 4)
-    eta = raw_eta if raw_eta else (datetime.date.fromisoformat(ship_date) + datetime.timedelta(days=days)).isoformat()
-    return {"eta": eta, "days": days}
-
-# Only these services will be shown to the customer
-ALLOWED_SERVICE_CODES = {
-    "UPS": {"ups_standard", "ups_2nd_day_air", "ups_next_day_air"},
-    "Canada Post": {"expedited_parcel", "xpresspost", "priority"},
-    "FedEx": {"fedex_ground", "fedex_2day", "fedex_priority_overnight"},
-    "Purolator": {"purolator_ground", "purolator_express"}
-}
 
 def detect_country(zip_code: str) -> str:
     z = zip_code.strip().replace(" ", "")
@@ -69,7 +48,7 @@ def fetch_carrier_rates(carrier_name, carrier_code, weight, zip_code, to_country
     try:
         payload = {
             "carrierCode": carrier_code,
-            "fromPostalCode": "M5V2A1", # <--- DOUBLE CHECK THIS IS YOUR WAREHOUSE ZIP
+            "fromPostalCode": "M5V2A1", # Ensure this matches your Warehouse Zip in ShipStation
             "toCountry": to_country,
             "toPostalCode": zip_code,
             "weight": {"value": weight, "units": "pounds"},
@@ -77,29 +56,35 @@ def fetch_carrier_rates(carrier_name, carrier_code, weight, zip_code, to_country
             "confirmation": "none",
             "shipDate": ship_date,
         }
-        resp = requests.post("https://ssapi.shipstation.com/shipments/getrates", 
-                             json=payload, headers=get_auth_header(), timeout=15)
+        
+        resp = requests.post(
+            "https://ssapi.shipstation.com/shipments/getrates", 
+            json=payload, 
+            headers=get_auth_header(), 
+            timeout=15
+        )
         
         if resp.status_code != 200:
-            return carrier_name, None, 0.0, f"SS Error: {resp.text[:100]}"
+            return carrier_name, None, 0.0, f"Error: {resp.text[:50]}"
 
-        raw = resp.json()
-        allowed = ALLOWED_SERVICE_CODES.get(carrier_name, set())
-        filtered = [r for r in raw if r.get("serviceCode") in allowed]
-        filtered.sort(key=lambda r: r.get("shipmentCost", 0.0))
+        raw_rates = resp.json()
+        if not raw_rates:
+            return carrier_name, None, 0.0, "No rates available for this carrier"
 
-        services = []
-        for r in filtered:
-            cost = r.get("shipmentCost", 0.0) + r.get("otherCost", 0.0)
-            transit = resolve_transit(r.get("serviceCode"), r.get("estimatedDeliveryDate"), r.get("transitDays"), ship_date)
-            services.append({
-                "service": r.get("serviceName"),
-                "total_cost": round(cost, 2),
-                "days": transit["days"]
-            })
+        # Sort by cost and pick the cheapest available option automatically
+        raw_rates.sort(key=lambda r: r.get("shipmentCost", 0.0))
+        best = raw_rates[0]
+        
+        cost = best.get("shipmentCost", 0.0) + best.get("otherCost", 0.0)
+        
+        service_data = {
+            "service": best.get("serviceName"),
+            "total_cost": round(cost, 2),
+            "days": best.get("transitDays", "Standard")
+        }
 
-        cheapest = services[0]["total_cost"] if services else 0.0
-        return carrier_name, services, cheapest, None
+        return carrier_name, service_data, service_data["total_cost"], None
+        
     except Exception as e:
         return carrier_name, None, 0.0, str(e)
 
@@ -115,7 +100,6 @@ def get_totals():
 
     final_results = {"grand_totals": {}, "breakdown": {}, "errors": []}
 
-    # Parallel processing to keep it fast
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = []
         for weight in weights:
@@ -124,19 +108,22 @@ def get_totals():
                 futures.append(executor.submit(fetch_carrier_rates, name, code, weight, zip_code, to_country, ship_date))
 
         for future in concurrent.futures.as_completed(futures):
-            name, services, cost, err = future.result()
+            name, service_data, cost, err = future.result()
             if err:
                 final_results["errors"].append({name: err})
-            elif services:
+            elif service_data:
                 if name not in final_results["grand_totals"]:
                     final_results["grand_totals"][name] = 0
                     final_results["breakdown"][name] = []
                 final_results["grand_totals"][name] += cost
-                final_results["breakdown"][name].append(services[0])
+                final_results["breakdown"][name].append(service_data)
+
+    # Round totals
+    for name in final_results["grand_totals"]:
+        final_results["grand_totals"][name] = round(final_results["grand_totals"][name], 2)
 
     return jsonify(final_results)
 
 if __name__ == "__main__":
-    # Force Port 8080 for Railway
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
