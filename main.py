@@ -14,20 +14,17 @@ CORS(app)
 def home():
     return "LOGISTICS_BRAIN_ACTIVE"
 
-# 1. API CREDENTIALS
-# Ensure these are set in Railway Variables exactly as named here
-SS_API_KEY = os.environ.get("SS_API_KEY")
-SS_API_SECRET = os.environ.get("SS_API_SECRET")
+# 1. MATCHING YOUR RAILWAY VARIABLE NAMES
+SS_API_KEY = os.environ.get("SHIPSTATION_API_KEY")
+SS_API_SECRET = os.environ.get("SHIPSTATION_API_SECRET")
 
 def get_auth_header() -> dict:
-    # Ensure no leading/trailing spaces in keys
-    key = SS_API_KEY.strip() if SS_API_KEY else ""
-    secret = SS_API_SECRET.strip() if SS_API_SECRET else ""
-    creds = base64.b64encode(f"{key}:{secret}".encode()).decode()
+    if not SS_API_KEY or not SS_API_SECRET:
+        return {}
+    creds = base64.b64encode(f"{SS_API_KEY.strip()}:{SS_API_SECRET.strip()}".encode()).decode()
     return {
         "Authorization": f"Basic {creds}",
-        "Content-Type": "application/json",
-        "Host": "ssapi.shipstation.com"
+        "Content-Type": "application/json"
     }
 
 CARRIERS = {
@@ -46,9 +43,13 @@ def detect_country(zip_code: str) -> str:
 
 def fetch_carrier_rates(carrier_name, carrier_code, weight, zip_code, to_country, ship_date):
     try:
+        headers = get_auth_header()
+        if not headers:
+            return carrier_name, None, 0.0, "Missing API Keys in Railway Variables"
+
         payload = {
             "carrierCode": carrier_code,
-            "fromPostalCode": "M5V2A1", # Ensure this matches your Warehouse Zip
+            "fromPostalCode": "M5V2A1", 
             "toCountry": to_country,
             "toPostalCode": zip_code,
             "weight": {"value": weight, "units": "pounds"},
@@ -60,17 +61,16 @@ def fetch_carrier_rates(carrier_name, carrier_code, weight, zip_code, to_country
         resp = requests.post(
             "https://ssapi.shipstation.com/shipments/getrates",
             json=payload,
-            headers=get_auth_header(),
+            headers=headers,
             timeout=15
         )
         
-        # If it fails, we want the FULL error message now
         if resp.status_code != 200:
-            return carrier_name, None, 0.0, f"Status {resp.status_code}: {resp.text}"
+            return carrier_name, None, 0.0, f"Auth/API Error: {resp.text}"
 
         raw_rates = resp.json()
         if not raw_rates:
-            return carrier_name, None, 0.0, "No rates available"
+            return carrier_name, None, 0.0, "No rates found for this carrier"
 
         raw_rates.sort(key=lambda r: r.get("shipmentCost", 0.0))
         best = raw_rates[0]
@@ -109,6 +109,9 @@ def get_totals():
                     final_results["breakdown"][name] = []
                 final_results["grand_totals"][name] += cost
                 final_results["breakdown"][name].append(service_data)
+
+    for name in final_results["grand_totals"]:
+        final_results["grand_totals"][name] = round(final_results["grand_totals"][name], 2)
 
     return jsonify(final_results)
 
