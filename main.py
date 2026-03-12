@@ -16,7 +16,7 @@ def home():
 
 @app.route('/api/health')
 def health():
-    return jsonify({"status": "Logistics Brain Awake", "version": "V6.0 - Full Services"})
+    return jsonify({"status": "Logistics Brain Awake", "version": "V7.0 - Multi-Dimension Boxes"})
 
 # 1. CREDENTIALS
 SS_API_KEY = os.environ.get("SHIPSTATION_API_KEY")
@@ -43,20 +43,31 @@ def detect_country(zip_code: str) -> str:
     z = zip_code.strip().replace(" ", "")
     return "CA" if re.match(r"^[A-Za-z]\d[A-Za-z]\d[A-Za-z]\d$", z) else "US"
 
-def fetch_carrier_rates(carrier_name, carrier_code, weight, box_index, zip_code, to_country, ship_date):
+def fetch_carrier_rates(carrier_name, carrier_code, package, box_index, zip_code, to_country, ship_date):
     try:
         headers = get_auth_header()
+        
+        # Base payload with weight
         payload = {
             "carrierCode": carrier_code,
             "fromPostalCode": "M5V2A1", 
             "toCountry": to_country,
             "toPostalCode": zip_code,
-            "weight": {"value": float(weight), "units": "pounds"},
+            "weight": {"value": float(package.get("weight", 1.0)), "units": "pounds"},
             "residential": False, 
             "confirmation": "none",
             "shipDate": ship_date,
         }
         
+        # Add dimensions if they exist for this specific box
+        if all(k in package for k in ("length", "width", "height")):
+            payload["dimensions"] = {
+                "units": "inches",
+                "length": float(package["length"]),
+                "width": float(package["width"]),
+                "height": float(package["height"])
+            }
+
         resp = requests.post(
             "https://ssapi.shipstation.com/shipments/getrates",
             json=payload, headers=headers, timeout=15
@@ -69,7 +80,6 @@ def fetch_carrier_rates(carrier_name, carrier_code, weight, box_index, zip_code,
         if not raw_rates:
             return carrier_name, box_index, None, "No rates available"
 
-        # Grab ALL services, not just the cheapest
         parsed_rates = []
         for r in raw_rates:
             parsed_rates.append({
@@ -87,7 +97,8 @@ def get_totals():
     data = request.get_json()
     if not data: return jsonify({"error": "No Data"}), 400
 
-    weights = data.get("weights", [10])
+    # Look for an array of packages with exact sizes, fallback to a single 1lb box if empty
+    packages = data.get("packages", [{"weight": 1.0}])
     zip_code = data.get("zip", "M5V2A1")
     to_country = detect_country(zip_code)
     ship_date = tomorrow_iso()
@@ -97,9 +108,9 @@ def get_totals():
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = []
-        for i, weight in enumerate(weights):
+        for i, pkg in enumerate(packages):
             for name, code in CARRIERS.items():
-                futures.append(executor.submit(fetch_carrier_rates, name, code, weight, i, zip_code, to_country, ship_date))
+                futures.append(executor.submit(fetch_carrier_rates, name, code, pkg, i, zip_code, to_country, ship_date))
 
         for future in concurrent.futures.as_completed(futures):
             c_name, b_idx, rates, err = future.result()
@@ -112,8 +123,8 @@ def get_totals():
     final_rates = {}
     for name in CARRIERS:
         c_results = [r for r in results if r['carrier'] == name]
-        if not c_results or len(c_results) < len(weights):
-            continue # Carrier failed for at least one box
+        if not c_results or len(c_results) < len(packages):
+            continue 
             
         service_agg = {}
         for box_data in c_results:
@@ -125,10 +136,9 @@ def get_totals():
                 service_agg[s_name]['total'] += rate['cost']
                 service_agg[s_name]['breakdown'].append({"box": b_idx + 1, "cost": rate['cost']})
         
-        # Only keep services that exist for ALL boxes in the cart
         valid_services = []
         for s_name, s_data in service_agg.items():
-            if len(s_data['breakdown']) == len(weights):
+            if len(s_data['breakdown']) == len(packages):
                 valid_services.append({
                     "service": s_name,
                     "total_cost": round(s_data['total'], 2),
