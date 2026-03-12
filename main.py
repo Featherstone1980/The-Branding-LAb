@@ -8,11 +8,16 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app) # Keeps the browser from blocking the connection
+CORS(app)
 
 @app.route('/')
 def home():
     return "LOGISTICS_BRAIN_ACTIVE"
+
+# I FORGOT THIS IN THE LAST VERSION - This is why Attempt #7 is failing
+@app.route('/api/health')
+def health():
+    return jsonify({"status": "Logistics Brain Awake", "version": "V4.0"})
 
 # 1. CREDENTIALS
 SS_API_KEY = os.environ.get("SHIPSTATION_API_KEY")
@@ -61,7 +66,6 @@ def fetch_carrier_rates(carrier_name, carrier_code, weight, zip_code, to_country
             timeout=15
         )
         
-        # No more character limit on errors
         if resp.status_code != 200:
             return carrier_name, None, 0.0, f"Error {resp.status_code}: {resp.text}"
 
@@ -115,6 +119,5 @@ def get_totals():
     return jsonify(final_results)
 
 if __name__ == "__main__":
-    # The one thing we must keep so the server doesn't 404
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
