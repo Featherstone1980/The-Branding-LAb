@@ -8,33 +8,28 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+CORS(app) # Keeps the browser from blocking the connection
 
 @app.route('/')
 def home():
     return "LOGISTICS_BRAIN_ACTIVE"
 
-# 1. API CREDENTIALS (Synced to your Railway Variable Names)
+# 1. CREDENTIALS
 SS_API_KEY = os.environ.get("SHIPSTATION_API_KEY")
 SS_API_SECRET = os.environ.get("SHIPSTATION_API_SECRET")
 
 def get_auth_header() -> dict:
     if not SS_API_KEY or not SS_API_SECRET:
         return {}
-    # Base64 Encode the Key:Secret for Basic Auth
-    auth_str = f"{SS_API_KEY.strip()}:{SS_API_SECRET.strip()}"
-    encoded_auth = base64.b64encode(auth_str.encode()).decode()
-    return {
-        "Authorization": f"Basic {encoded_auth}",
-        "Content-Type": "application/json"
-    }
+    creds = base64.b64encode(f"{SS_API_KEY.strip()}:{SS_API_SECRET.strip()}".encode()).decode()
+    return {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
 
-# 2. CARRIER CODES
+# 2. YOUR ORIGINAL WORKING CARRIERS
 CARRIERS = {
-    "UPS": "ups",
-    "Canada Post": "canada_post",
-    "FedEx": "fedex",
-    "Purolator": "purolator_ca"
+    "UPS": "ups_walleted",
+    "Canada Post": "canada_post_walleted",
+    "FedEx": "fedex_walleted",
+    "Purolator": "purolator_walleted"
 }
 
 def tomorrow_iso() -> str:
@@ -47,16 +42,14 @@ def detect_country(zip_code: str) -> str:
 def fetch_carrier_rates(carrier_name, carrier_code, weight, zip_code, to_country, ship_date):
     try:
         headers = get_auth_header()
-        if not headers:
-            return carrier_name, None, 0.0, "API Keys are missing in Railway Variables."
-
+        
         payload = {
             "carrierCode": carrier_code,
-            "fromPostalCode": "M5V2A1", # Your warehouse origin
+            "fromPostalCode": "M5V2A1", # Your original origin
             "toCountry": to_country,
             "toPostalCode": zip_code,
             "weight": {"value": float(weight), "units": "pounds"},
-            "residential": True,
+            "residential": False, # Reverted to your original setting
             "confirmation": "none",
             "shipDate": ship_date,
         }
@@ -68,19 +61,21 @@ def fetch_carrier_rates(carrier_name, carrier_code, weight, zip_code, to_country
             timeout=15
         )
         
-        # WE REMOVED THE [:50] LIMIT - If this fails, paste the FULL error
+        # No more character limit on errors
         if resp.status_code != 200:
-            return carrier_name, None, 0.0, f"Status {resp.status_code}: {resp.text}"
+            return carrier_name, None, 0.0, f"Error {resp.status_code}: {resp.text}"
 
         raw_rates = resp.json()
         if not raw_rates:
-            return carrier_name, None, 0.0, "ShipStation returned 0 rates for this carrier."
+            return carrier_name, None, 0.0, "No rates available"
 
+        # Sort and grab cheapest
         raw_rates.sort(key=lambda r: r.get("shipmentCost", 0.0))
         best = raw_rates[0]
         cost = best.get("shipmentCost", 0.0) + best.get("otherCost", 0.0)
         
         return carrier_name, {"service": best.get("serviceName"), "total_cost": round(cost, 2)}, round(cost, 2), None
+
     except Exception as e:
         return carrier_name, None, 0.0, str(e)
 
@@ -120,5 +115,6 @@ def get_totals():
     return jsonify(final_results)
 
 if __name__ == "__main__":
+    # The one thing we must keep so the server doesn't 404
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
