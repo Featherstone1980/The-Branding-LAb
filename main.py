@@ -16,7 +16,7 @@ def home():
 
 @app.route('/api/health')
 def health():
-    return jsonify({"status": "Logistics Brain Awake", "version": "V5.0 - US/CA Unlocked"})
+    return jsonify({"status": "Logistics Brain Awake", "version": "V6.0 - Full Services"})
 
 # 1. CREDENTIALS
 SS_API_KEY = os.environ.get("SHIPSTATION_API_KEY")
@@ -28,7 +28,7 @@ def get_auth_header() -> dict:
     creds = base64.b64encode(f"{SS_API_KEY.strip()}:{SS_API_SECRET.strip()}".encode()).decode()
     return {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
 
-# 2. YOUR ORIGINAL WORKING CARRIERS
+# 2. CARRIERS
 CARRIERS = {
     "UPS": "ups_walleted",
     "Canada Post": "canada_post_walleted",
@@ -41,16 +41,14 @@ def tomorrow_iso() -> str:
 
 def detect_country(zip_code: str) -> str:
     z = zip_code.strip().replace(" ", "")
-    # If it's alphanumeric (A1A 1A1), it's Canada. Otherwise, assume US.
     return "CA" if re.match(r"^[A-Za-z]\d[A-Za-z]\d[A-Za-z]\d$", z) else "US"
 
-def fetch_carrier_rates(carrier_name, carrier_code, weight, zip_code, to_country, ship_date):
+def fetch_carrier_rates(carrier_name, carrier_code, weight, box_index, zip_code, to_country, ship_date):
     try:
         headers = get_auth_header()
-        
         payload = {
             "carrierCode": carrier_code,
-            "fromPostalCode": "M5V2A1", # Your warehouse origin
+            "fromPostalCode": "M5V2A1", 
             "toCountry": to_country,
             "toPostalCode": zip_code,
             "weight": {"value": float(weight), "units": "pounds"},
@@ -61,27 +59,28 @@ def fetch_carrier_rates(carrier_name, carrier_code, weight, zip_code, to_country
         
         resp = requests.post(
             "https://ssapi.shipstation.com/shipments/getrates",
-            json=payload,
-            headers=headers,
-            timeout=15
+            json=payload, headers=headers, timeout=15
         )
         
         if resp.status_code != 200:
-            return carrier_name, None, 0.0, f"Error {resp.status_code}: {resp.text}"
+            return carrier_name, box_index, None, f"Error {resp.status_code}: {resp.text}"
 
         raw_rates = resp.json()
         if not raw_rates:
-            return carrier_name, None, 0.0, "No rates available"
+            return carrier_name, box_index, None, "No rates available"
 
-        # Sort and grab cheapest
-        raw_rates.sort(key=lambda r: r.get("shipmentCost", 0.0))
-        best = raw_rates[0]
-        cost = best.get("shipmentCost", 0.0) + best.get("otherCost", 0.0)
-        
-        return carrier_name, {"service": best.get("serviceName"), "total_cost": round(cost, 2)}, round(cost, 2), None
+        # Grab ALL services, not just the cheapest
+        parsed_rates = []
+        for r in raw_rates:
+            parsed_rates.append({
+                "service": r.get("serviceName"),
+                "cost": r.get("shipmentCost", 0.0) + r.get("otherCost", 0.0)
+            })
+            
+        return carrier_name, box_index, parsed_rates, None
 
     except Exception as e:
-        return carrier_name, None, 0.0, str(e)
+        return carrier_name, box_index, None, str(e)
 
 @app.route("/api/get-totals", methods=["POST"])
 def get_totals():
@@ -93,30 +92,54 @@ def get_totals():
     to_country = detect_country(zip_code)
     ship_date = tomorrow_iso()
 
-    final_results = {"grand_totals": {}, "breakdown": {}, "errors": []}
+    results = []
+    errors = []
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = []
-        for weight in weights:
+        for i, weight in enumerate(weights):
             for name, code in CARRIERS.items():
-                # THE BLOCKER WAS REMOVED HERE. All 4 carriers will ping for US and CA.
-                futures.append(executor.submit(fetch_carrier_rates, name, code, weight, zip_code, to_country, ship_date))
+                futures.append(executor.submit(fetch_carrier_rates, name, code, weight, i, zip_code, to_country, ship_date))
 
         for future in concurrent.futures.as_completed(futures):
-            name, service_data, cost, err = future.result()
+            c_name, b_idx, rates, err = future.result()
             if err:
-                final_results["errors"].append({name: err})
-            elif service_data:
-                if name not in final_results["grand_totals"]:
-                    final_results["grand_totals"][name] = 0
-                    final_results["breakdown"][name] = []
-                final_results["grand_totals"][name] += cost
-                final_results["breakdown"][name].append(service_data)
+                errors.append({c_name: err})
+            elif rates:
+                results.append({"carrier": c_name, "box_index": b_idx, "rates": rates})
 
-    for name in final_results["grand_totals"]:
-        final_results["grand_totals"][name] = round(final_results["grand_totals"][name], 2)
+    # Group the services together across all boxes
+    final_rates = {}
+    for name in CARRIERS:
+        c_results = [r for r in results if r['carrier'] == name]
+        if not c_results or len(c_results) < len(weights):
+            continue # Carrier failed for at least one box
+            
+        service_agg = {}
+        for box_data in c_results:
+            b_idx = box_data['box_index']
+            for rate in box_data['rates']:
+                s_name = rate['service']
+                if s_name not in service_agg:
+                    service_agg[s_name] = {'total': 0.0, 'breakdown': []}
+                service_agg[s_name]['total'] += rate['cost']
+                service_agg[s_name]['breakdown'].append({"box": b_idx + 1, "cost": rate['cost']})
+        
+        # Only keep services that exist for ALL boxes in the cart
+        valid_services = []
+        for s_name, s_data in service_agg.items():
+            if len(s_data['breakdown']) == len(weights):
+                valid_services.append({
+                    "service": s_name,
+                    "total_cost": round(s_data['total'], 2),
+                    "breakdown": sorted(s_data['breakdown'], key=lambda x: x['box'])
+                })
+        
+        valid_services.sort(key=lambda x: x['total_cost'])
+        if valid_services:
+            final_rates[name] = valid_services
 
-    return jsonify(final_results)
+    return jsonify({"rates": final_rates, "errors": errors})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
