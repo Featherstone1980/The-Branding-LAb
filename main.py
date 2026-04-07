@@ -7,6 +7,46 @@ import concurrent.futures
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
+# 1. IMPORT THE SHIELD MODULES
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+app = Flask(__name__)
+CORS(app)
+
+# 2. THE PROXY BYPASS (CRITICAL FOR RAILWAY)
+# Tells Flask to read the actual user's IP, not the Railway Load Balancer's IP
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
+# 3. INITIALIZE THE LIMITER (IN-MEMORY)
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[], # We leave this empty to only limit specific routes
+    storage_uri="memory://",
+)
+
+@app.route('/')
+def home():
+    return "LOGISTICS_BRAIN_ACTIVE"
+
+@app.route('/api/health')
+def health():
+    return jsonify({"status": "Logistics Brain Awake", "version": "V7.0 - Multi-Dimension Boxes"})
+
+# 1. CREDENTIALS
+SS_API_KEY = os.environ.get("SHIPSTATION_API_KEY")
+SS_API_SECRET = os.environ.get("SHIPSTATION_API_SECRET")
+import os
+import re
+import base64
+import datetime
+import requests
+import concurrent.futures
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+
 app = Flask(__name__)
 CORS(app)
 
