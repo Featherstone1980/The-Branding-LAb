@@ -38,29 +38,6 @@ def health():
 # 1. CREDENTIALS
 SS_API_KEY = os.environ.get("SHIPSTATION_API_KEY")
 SS_API_SECRET = os.environ.get("SHIPSTATION_API_SECRET")
-import os
-import re
-import base64
-import datetime
-import requests
-import concurrent.futures
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-
-app = Flask(__name__)
-CORS(app)
-
-@app.route('/')
-def home():
-    return "LOGISTICS_BRAIN_ACTIVE"
-
-@app.route('/api/health')
-def health():
-    return jsonify({"status": "Logistics Brain Awake", "version": "V7.0 - Multi-Dimension Boxes"})
-
-# 1. CREDENTIALS
-SS_API_KEY = os.environ.get("SHIPSTATION_API_KEY")
-SS_API_SECRET = os.environ.get("SHIPSTATION_API_SECRET")
 
 def get_auth_header() -> dict:
     if not SS_API_KEY or not SS_API_SECRET:
@@ -132,7 +109,11 @@ def fetch_carrier_rates(carrier_name, carrier_code, package, box_index, zip_code
     except Exception as e:
         return carrier_name, box_index, None, str(e)
 
+
+# 4. THE API SHIELD
+# This decorator locks down the route from bot abuse and billing spikes
 @app.route("/api/get-totals", methods=["POST"])
+@limiter.limit("15 per 10 minute", error_message="CRITICAL SECURE: API rate limit exceeded. Please wait 10 minutes.")
 def get_totals():
     data = request.get_json()
     if not data: return jsonify({"error": "No Data"}), 400
