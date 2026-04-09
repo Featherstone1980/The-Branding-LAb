@@ -115,6 +115,11 @@ def fetch_carrier_rates(carrier_name, carrier_code, package, box_index, zip_code
 @app.route("/api/get-totals", methods=["POST"])
 @limiter.limit("15 per 10 minute", error_message="CRITICAL SECURE: API rate limit exceeded. Please wait 10 minutes.")
 def get_totals():
+    # THE API SHIELD: Kill unauthorized traffic before processing JSON or hitting ShipStation
+    auth_header = request.headers.get("X-Snarky-Auth")
+    if auth_header != "Elite-Matrix-70":
+        return jsonify({"error": "UNAUTHORIZED ACCESS: INVALID SECURE TOKEN"}), 403
+
     data = request.get_json()
     if not data: return jsonify({"error": "No Data"}), 400
 
