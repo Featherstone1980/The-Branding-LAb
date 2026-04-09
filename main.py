@@ -67,7 +67,7 @@ def fetch_carrier_rates(carrier_name, carrier_code, package, box_index, zip_code
         # Base payload with weight
         payload = {
             "carrierCode": carrier_code,
-            "fromPostalCode": "M5V2A1", 
+            "fromPostalCode": "K8N4M7", 
             "toCountry": to_country,
             "toPostalCode": zip_code,
             "weight": {"value": float(package.get("weight", 1.0)), "units": "pounds"},
@@ -120,7 +120,7 @@ def get_totals():
 
     # Look for an array of packages with exact sizes, fallback to a single 1lb box if empty
     packages = data.get("packages", [{"weight": 1.0}])
-    zip_code = data.get("zip", "M5V2A1")
+    zip_code = data.get("zip", "K8N4M7")
     to_country = detect_country(zip_code)
     ship_date = tomorrow_iso()
 
