@@ -64,26 +64,26 @@ def fetch_carrier_rates(carrier_name, carrier_code, package, box_index, zip_code
     try:
         headers = get_auth_header()
         
-        # Base payload with weight
-        payload = {
-            "carrierCode": carrier_code,
-            "fromPostalCode": "K8N4M7", 
-            "toCountry": to_country,
-            "toPostalCode": zip_code,
-            "weight": {"value": float(package.get("weight", 1.0)), "units": "pounds"},
-            "residential": False, 
-            "confirmation": "none",
-            "shipDate": ship_date,
-        }
+        # Base payload with weight (brackets purged for parser immunity)
+        payload = dict(
+            carrierCode=carrier_code,
+            fromPostalCode="K8N4M7", 
+            toCountry=to_country,
+            toPostalCode=zip_code,
+            weight=dict(value=float(package.get("weight", 1.0)), units="pounds"),
+            residential=False, 
+            confirmation="none",
+            shipDate=ship_date
+        )
         
         # Add dimensions if they exist for this specific box
         if all(k in package for k in ("length", "width", "height")):
-            payload["dimensions"] = {
-                "units": "inches",
-                "length": float(package["length"]),
-                "width": float(package["width"]),
-                "height": float(package["height"])
-            }
+            payload.update(dict(dimensions=dict(
+                units="inches",
+                length=float(package.get("length")),
+                width=float(package.get("width")),
+                height=float(package.get("height"))
+            )))
 
         resp = requests.post(
             "https://ssapi.shipstation.com/shipments/getrates",
@@ -97,12 +97,20 @@ def fetch_carrier_rates(carrier_name, carrier_code, package, box_index, zip_code
         if not raw_rates:
             return carrier_name, box_index, None, "No rates available"
 
-        parsed_rates = []
+        parsed_rates = list()
         for r in raw_rates:
-            parsed_rates.append({
-                "service": r.get("serviceName"),
-                "cost": r.get("shipmentCost", 0.0) + r.get("otherCost", 0.0)
-            })
+            # TARGETED FIX: The Transit Date Black Hole (API Days + 12 Day Buffer)
+            raw_transit = r.get("transitDays")
+            transit_days = int(raw_transit) if raw_transit else 5 # Fallback to 5 if ShipStation returns null
+            total_lead_time = transit_days + 12
+            
+            # Injecting directly into the service string so it reaches both the UI and Make.com
+            formatted_service = f"{r.get('serviceName')} (Est. {total_lead_time} Days)"
+
+            parsed_rates.append(dict(
+                service=formatted_service,
+                cost=r.get("shipmentCost", 0.0) + r.get("otherCost", 0.0)
+            ))
             
         return carrier_name, box_index, parsed_rates, None
 
