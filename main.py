@@ -4,8 +4,20 @@ import base64
 import datetime
 import requests
 import concurrent.futures
+import time
+import hashlib
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+
+# SECURE GATE: IN-MEMORY LOGISTICS CACHE (24 HOUR TTL)
+LOGISTICS_CACHE = dict()
+CACHE_TTL = 86400 # 24 hours in seconds
+
+def get_cache_key(zip_code, packages):
+    # Generates a unique hash based on Postal + Box Count + Total Weight
+    total_w = sum((float(p.get("weight", 0)) for p in packages))
+    raw_key = f"{str(zip_code).strip().upper()}_{len(packages)}_{total_w}"
+    return hashlib.md5(raw_key.encode()).hexdigest()
 
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -133,6 +145,17 @@ def get_totals():
         return jsonify(dict(error="CRITICAL: Maximum package limit exceeded.")), 400
 
     zip_code = data.get("zip", "K8N4M7")
+    
+    # --- CACHE INTERCEPT START ---
+    c_key = get_cache_key(zip_code, packages)
+    cached_data = LOGISTICS_CACHE.get(c_key)
+    if cached_data:
+        if time.time() - cached_data.get("time", 0) < CACHE_TTL:
+            return jsonify(cached_data.get("payload"))
+        else:
+            LOGISTICS_CACHE.pop(c_key, None) # Clear expired cache
+    # --- CACHE INTERCEPT END ---
+
     to_country = detect_country(zip_code)
     ship_date = tomorrow_iso()
 
@@ -186,7 +209,13 @@ def get_totals():
         if valid_services:
             final_rates.update({name: valid_services})
 
-    return jsonify(dict(rates=final_rates, errors=errors))
+    final_payload = dict(rates=final_rates, errors=errors)
+    
+    # Only cache the result if there were no API errors
+    if not errors and final_rates:
+        LOGISTICS_CACHE.update({c_key: dict(time=time.time(), payload=final_payload)})
+
+    return jsonify(final_payload)
 
 # THE SECURE WEBHOOK PROXY
 @app.route("/api/submit-order", methods=("POST",))
