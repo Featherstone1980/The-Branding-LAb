@@ -195,6 +195,21 @@ def submit_order():
     data = request.get_json()
     if not data: return jsonify(dict(error="No Payload provided")), 400
     
+    # SECURE GATE: Asymmetric Payload Trust Firewall
+    # Force server-side verification of the client's ledger math
+    ledger = data.get("ledger")
+    if ledger:
+        expected_total = round(
+            float(ledger.get("subtotal", 0)) + 
+            float(ledger.get("vector_fee", 0)) + 
+            float(ledger.get("shipping", 0)) + 
+            float(ledger.get("taxes", 0)), 2
+        )
+        client_total = round(float(ledger.get("total_capex", 0)), 2)
+        
+        if expected_total != client_total:
+            return jsonify(dict(error="CRITICAL SECURE: Ledger math anomaly detected. Payload rejected.")), 400
+
     try:
         make_webhook_url = os.environ.get("MAKE_WEBHOOK_URL")
         if not make_webhook_url:
