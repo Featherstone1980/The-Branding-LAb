@@ -13,8 +13,8 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
 
-# TARGETED FIX: Lock down CORS to prevent wildcard API abuse
-CORS(app, resources={r"/api/*": {"origins": "*"}}, allow_headers=list(("Content-Type", "X-Snarky-Auth")))
+# SECURE GATE: Lock down CORS exclusively to authorized studio domain to prevent API limit bleeding
+CORS(app, resources={r"/api/*": {"origins": list(("https://snarkymoose.com", "https://www.snarkymoose.com"))}}, allow_headers=list(("Content-Type", "X-Snarky-Auth")))
 
 # THE PROXY BYPASS (CRITICAL FOR RAILWAY)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
