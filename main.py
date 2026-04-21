@@ -127,6 +127,11 @@ def get_totals():
 
     # TARGETED FIX: Array brackets explicitly purged. Fallback tuple/dict used.
     packages = data.get("packages", list((dict(weight=1.0),)))
+    
+    # SECURE GATE: Hard cap package array to prevent thread exhaustion DOS
+    if len(packages) > 50:
+        return jsonify(dict(error="CRITICAL: Maximum package limit exceeded.")), 400
+
     zip_code = data.get("zip", "K8N4M7")
     to_country = detect_country(zip_code)
     ship_date = tomorrow_iso()
@@ -182,6 +187,28 @@ def get_totals():
             final_rates.update({name: valid_services})
 
     return jsonify(dict(rates=final_rates, errors=errors))
+
+# THE SECURE WEBHOOK PROXY
+@app.route("/api/submit-order", methods=("POST",))
+@limiter.limit("5 per 10 minute", error_message="CRITICAL SECURE: Transmission limit exceeded.")
+def submit_order():
+    data = request.get_json()
+    if not data: return jsonify(dict(error="No Payload provided")), 400
+    
+    try:
+        make_webhook_url = os.environ.get("MAKE_WEBHOOK_URL")
+        if not make_webhook_url:
+            return jsonify(dict(error="Server configuration missing")), 500
+            
+        resp = requests.post(make_webhook_url, json=data, timeout=15)
+        
+        if resp.status_code == 200:
+            return jsonify(dict(status="AUTHORIZED", detail="Payload securely routed")), 200
+        else:
+            return jsonify(dict(error="Webhook Rejected by external server")), resp.status_code
+            
+    except Exception as e:
+        return jsonify(dict(error=str(e))), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
